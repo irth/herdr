@@ -1190,13 +1190,8 @@ impl AppState {
             return;
         }
 
-        let entries = crate::ui::workspace_list_entries(self);
-        let Some(target_entry_idx) = entries.iter().position(|entry| {
-            matches!(
-                entry,
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == idx
-            )
-        }) else {
+        let Some(target_entry_idx) = crate::ui::workspace_list_workspace_item_index(self, idx)
+        else {
             return;
         };
 
@@ -1731,9 +1726,6 @@ impl AppState {
                 self.selected = self.workspaces.len() - 1;
             }
             self.active = Some(self.selected);
-            self.workspace_scroll = self
-                .workspace_scroll
-                .min(self.workspaces.len().saturating_sub(1));
             self.ensure_workspace_visible(self.selected);
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
@@ -3398,9 +3390,6 @@ impl AppState {
                 if self.selected >= self.workspaces.len() {
                     self.selected = self.workspaces.len() - 1;
                 }
-                self.workspace_scroll = self
-                    .workspace_scroll
-                    .min(self.workspaces.len().saturating_sub(1));
                 self.ensure_workspace_visible(self.selected);
             }
         } else {

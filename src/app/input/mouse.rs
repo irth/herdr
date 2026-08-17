@@ -588,6 +588,13 @@ impl AppState {
                         }
                     }
 
+                    if let Some((ws_idx, pane_id)) =
+                        self.workspace_tab_target_at(mouse.column, mouse.row)
+                    {
+                        self.mode = Mode::Terminal;
+                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                    }
+
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_presses.insert(
                             source_id,

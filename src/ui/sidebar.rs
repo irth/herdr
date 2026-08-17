@@ -303,6 +303,29 @@ pub(crate) enum WorkspaceListEntry {
     Workspace { ws_idx: usize, indented: bool },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceListItem {
+    Workspace {
+        entry_idx: usize,
+        ws_idx: usize,
+        indented: bool,
+    },
+    Tab {
+        entry_idx: usize,
+        ws_idx: usize,
+        tab_idx: usize,
+        workspace_indented: bool,
+    },
+}
+
+impl WorkspaceListItem {
+    fn entry_idx(self) -> usize {
+        match self {
+            Self::Workspace { entry_idx, .. } | Self::Tab { entry_idx, .. } => entry_idx,
+        }
+    }
+}
+
 pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
     matches!(
         entries.get(idx.saturating_add(1)),
@@ -317,7 +340,7 @@ pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested:
         return requested;
     }
 
-    if workspace_list_entries(app).is_empty() {
+    if workspace_list_items(app).is_empty() {
         0
     } else {
         requested.min(workspace_list_bottom_start(app, ws_area))
@@ -326,6 +349,46 @@ pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested:
 
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
     workspace_list_entries_inner(app, false)
+}
+
+fn workspace_list_items(app: &AppState) -> Vec<WorkspaceListItem> {
+    let entries = workspace_list_entries(app);
+    let mut items = Vec::new();
+    for (entry_idx, entry) in entries.iter().enumerate() {
+        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry;
+        items.push(WorkspaceListItem::Workspace {
+            entry_idx,
+            ws_idx: *ws_idx,
+            indented: *indented,
+        });
+        if !app.sidebar_spaces.show_tabs {
+            continue;
+        }
+        let Some(workspace) = app.workspaces.get(*ws_idx) else {
+            continue;
+        };
+        items.extend(workspace.tabs.iter().enumerate().map(|(tab_idx, _)| {
+            WorkspaceListItem::Tab {
+                entry_idx,
+                ws_idx: *ws_idx,
+                tab_idx,
+                workspace_indented: *indented,
+            }
+        }));
+    }
+    items
+}
+
+pub(crate) fn workspace_list_workspace_item_index(app: &AppState, ws_idx: usize) -> Option<usize> {
+    workspace_list_items(app).iter().position(|item| {
+        matches!(
+            item,
+            WorkspaceListItem::Workspace {
+                ws_idx: item_ws_idx,
+                ..
+            } if *item_ws_idx == ws_idx
+        )
+    })
 }
 
 /// Like [`workspace_list_entries`] but always expands worktree groups, ignoring
@@ -461,18 +524,20 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
     let mut used_rows = 0u16;
     let mut visible = 0usize;
     let entries = workspace_list_entries(app);
-    for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
-        let (row_height, gap) = match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+    let items = workspace_list_items(app);
+    for (item_idx, item) in items.iter().enumerate().skip(scroll) {
+        let row_height = match item {
+            WorkspaceListItem::Workspace {
+                ws_idx, indented, ..
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
-                (
-                    workspace_row_height_in_body(app, ws, *indented, body.height),
-                    workspace_entry_gap(app, &entries, entry_idx),
-                )
+                workspace_row_height_in_body(app, ws, *indented, body.height)
             }
+            WorkspaceListItem::Tab { .. } => 1,
         };
+        let gap = workspace_list_item_gap(app, &entries, &items, item_idx);
         if used_rows.saturating_add(row_height) > body.height {
             break;
         }
@@ -486,23 +551,48 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
 fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
     let body = workspace_list_body_rect(area, false);
     let entries = workspace_list_entries(app);
+    let items = workspace_list_items(app);
     let mut used_rows = 0u16;
-    let mut start = entries.len();
-    for (entry_idx, entry) in entries.iter().enumerate().rev() {
-        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry;
-        let Some(workspace) = app.workspaces.get(*ws_idx) else {
-            continue;
+    let mut start = items.len();
+    for (item_idx, item) in items.iter().enumerate().rev() {
+        let row_height = match item {
+            WorkspaceListItem::Workspace {
+                ws_idx, indented, ..
+            } => {
+                let Some(workspace) = app.workspaces.get(*ws_idx) else {
+                    continue;
+                };
+                workspace_row_height_in_body(app, workspace, *indented, body.height)
+            }
+            WorkspaceListItem::Tab { .. } => 1,
         };
-        let gap = workspace_entry_gap(app, &entries, entry_idx);
-        let needed = workspace_row_height_in_body(app, workspace, *indented, body.height)
-            .saturating_add(gap);
+        let gap = workspace_list_item_gap(app, &entries, &items, item_idx);
+        let needed = row_height.saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(needed);
-        start = entry_idx;
+        start = item_idx;
     }
-    start.min(entries.len().saturating_sub(1))
+    start.min(items.len().saturating_sub(1))
+}
+
+fn workspace_list_item_gap(
+    app: &AppState,
+    entries: &[WorkspaceListEntry],
+    items: &[WorkspaceListItem],
+    item_idx: usize,
+) -> u16 {
+    let Some(item) = items.get(item_idx).copied() else {
+        return 0;
+    };
+    if items
+        .get(item_idx.saturating_add(1))
+        .is_some_and(|next| next.entry_idx() == item.entry_idx())
+    {
+        return 0;
+    }
+    workspace_entry_gap(app, entries, item.entry_idx())
 }
 
 pub(crate) fn workspace_list_scroll_metrics(
@@ -658,7 +748,10 @@ pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<R
 pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
-) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<crate::app::state::WorkspaceTabRowArea>,
+) {
     let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
@@ -674,17 +767,20 @@ pub(crate) fn compute_workspace_list_areas(
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     let mut cards = Vec::new();
-    let headers = Vec::new();
+    let mut tab_rows = Vec::new();
 
     let entries = workspace_list_entries(app);
-    for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
-        match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+    let items = workspace_list_items(app);
+    for (item_idx, item) in items.iter().enumerate().skip(scroll) {
+        let gap = workspace_list_item_gap(app, &entries, &items, item_idx);
+        match item {
+            WorkspaceListItem::Workspace {
+                ws_idx, indented, ..
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
                 let row_height = workspace_row_height_in_body(app, ws, *indented, body.height);
-                let gap = workspace_entry_gap(app, &entries, entry_idx);
                 if row_y.saturating_add(row_height) > body_bottom {
                     break;
                 }
@@ -698,10 +794,27 @@ pub(crate) fn compute_workspace_list_areas(
                     .saturating_add(gap)
                     .min(body_bottom);
             }
+            WorkspaceListItem::Tab {
+                ws_idx,
+                tab_idx,
+                workspace_indented,
+                ..
+            } => {
+                if row_y.saturating_add(1) > body_bottom {
+                    break;
+                }
+                tab_rows.push(crate::app::state::WorkspaceTabRowArea {
+                    ws_idx: *ws_idx,
+                    tab_idx: *tab_idx,
+                    rect: Rect::new(body.x, row_y, body.width, 1),
+                    workspace_indented: *workspace_indented,
+                });
+                row_y = row_y.saturating_add(1).saturating_add(gap).min(body_bottom);
+            }
         }
     }
 
-    (cards, headers)
+    (cards, tab_rows)
 }
 
 pub(crate) fn compute_workspace_card_areas(
@@ -876,6 +989,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
 pub(crate) fn workspace_drop_slots(
     app: &AppState,
     cards: &[crate::app::state::WorkspaceCardArea],
+    tab_rows: &[crate::app::state::WorkspaceTabRowArea],
     area: Rect,
 ) -> Vec<(crate::app::state::WorkspaceDropTarget, u16)> {
     if area.height == 0 || cards.is_empty() {
@@ -931,6 +1045,18 @@ pub(crate) fn workspace_drop_slots(
     let Some(last) = cards.last() else {
         return slots;
     };
+    let visible_last_tabs = tab_rows
+        .iter()
+        .filter(|row| row.ws_idx == last.ws_idx)
+        .count();
+    if app.sidebar_spaces.show_tabs
+        && app
+            .workspaces
+            .get(last.ws_idx)
+            .is_some_and(|workspace| visible_last_tabs < workspace.tabs.len())
+    {
+        return slots;
+    }
     let Some(last_entry_idx) = entry_position(last.ws_idx) else {
         return slots;
     };
@@ -947,7 +1073,12 @@ pub(crate) fn workspace_drop_slots(
         }
         None => crate::app::state::WorkspaceDropTarget::End,
     };
-    let row = last.rect.y.saturating_add(last.rect.height);
+    let row = tab_rows
+        .iter()
+        .filter(|tab| tab.ws_idx == last.ws_idx)
+        .map(|tab| tab.rect.y.saturating_add(tab.rect.height))
+        .max()
+        .unwrap_or_else(|| last.rect.y.saturating_add(last.rect.height));
     if row < list_bottom
         && slots
             .last()
@@ -961,10 +1092,11 @@ pub(crate) fn workspace_drop_slots(
 pub(crate) fn workspace_drop_indicator_row(
     app: &AppState,
     cards: &[crate::app::state::WorkspaceCardArea],
+    tab_rows: &[crate::app::state::WorkspaceTabRowArea],
     area: Rect,
     target: crate::app::state::WorkspaceDropTarget,
 ) -> Option<u16> {
-    workspace_drop_slots(app, cards, area)
+    workspace_drop_slots(app, cards, tab_rows, area)
         .into_iter()
         .find_map(|(candidate, row)| (candidate == target).then_some(row))
 }
@@ -1215,7 +1347,13 @@ fn render_workspace_list(
         Some(crate::app::state::DragTarget::WorkspaceReorder {
             drop_target: Some(drop_target),
             ..
-        }) => workspace_drop_indicator_row(app, &app.view.workspace_card_areas, area, *drop_target),
+        }) => workspace_drop_indicator_row(
+            app,
+            &app.view.workspace_card_areas,
+            &app.view.workspace_tab_row_areas,
+            area,
+            *drop_target,
+        ),
         _ => None,
     };
 
@@ -1233,6 +1371,7 @@ fn render_workspace_list(
     let metrics = workspace_list_scroll_metrics(app, area);
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
     let cards = &app.view.workspace_card_areas;
+    let tab_rows = &app.view.workspace_tab_row_areas;
     let entries = workspace_list_entries(app);
 
     for card in cards {
@@ -1377,6 +1516,72 @@ fn render_workspace_list(
                 workspace_group_chevron_rect(card),
             );
         }
+    }
+
+    for tab_row in tab_rows {
+        let Some(workspace) = app.workspaces.get(tab_row.ws_idx) else {
+            continue;
+        };
+        let Some(tab) = workspace.tabs.get(tab_row.tab_idx) else {
+            continue;
+        };
+        let Some(tab_label) = workspace.tab_display_name(tab_row.tab_idx) else {
+            continue;
+        };
+        let is_active =
+            app.active == Some(tab_row.ws_idx) && workspace.active_tab_index() == tab_row.tab_idx;
+        if is_active {
+            frame
+                .buffer_mut()
+                .set_style(tab_row.rect, Style::default().bg(p.active_row_bg));
+        }
+
+        let mut spans = vec![Span::raw(if tab_row.workspace_indented {
+            "      "
+        } else {
+            "   "
+        })];
+        let last_tab = tab_row.tab_idx + 1 == workspace.tabs.len();
+        spans.push(Span::styled(
+            if last_tab { "└─ " } else { "├─ " },
+            Style::default().fg(p.overlay0),
+        ));
+        let prefix_width = if tab_row.workspace_indented { 9 } else { 6 };
+        let available = tab_row.rect.width.saturating_sub(prefix_width) as usize;
+        let terminal_title = tab
+            .terminal_id(tab.layout.focused())
+            .and_then(|terminal_id| app.terminals.get(terminal_id))
+            .and_then(crate::terminal::TerminalState::terminal_title_stripped);
+        let tab_style = if is_active {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
+        if let Some(title) = terminal_title.filter(|title| !title.is_empty()) {
+            let separator_width = display_width(" · ");
+            if available > separator_width + 1 {
+                let flexible = available - separator_width;
+                let tab_budget = display_width(&tab_label).min(flexible.div_ceil(2));
+                let title_budget = flexible.saturating_sub(tab_budget);
+                spans.push(Span::styled(
+                    truncate_end(&tab_label, tab_budget),
+                    tab_style,
+                ));
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ));
+                spans.push(Span::styled(
+                    truncate_end(&title, title_budget),
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ));
+            } else {
+                spans.push(Span::styled(truncate_end(&tab_label, available), tab_style));
+            }
+        } else {
+            spans.push(Span::styled(truncate_end(&tab_label, available), tab_style));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), tab_row.rect);
     }
 
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
@@ -2716,6 +2921,96 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn workspace_tab_rows_are_opt_in_and_leave_parent_cards_separate() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("repo");
+        workspace.test_add_tab(Some("review"));
+        app.workspaces = vec![workspace];
+        app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let area = Rect::new(0, 0, 30, 20);
+
+        let (cards, tab_rows) = compute_workspace_list_areas(&app, area);
+        assert_eq!(cards.len(), 1);
+        assert!(tab_rows.is_empty());
+
+        app.sidebar_spaces.show_tabs = true;
+        let (cards, tab_rows) = compute_workspace_list_areas(&app, area);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(tab_rows.len(), 2);
+        assert_eq!(tab_rows[0].tab_idx, 0);
+        assert_eq!(tab_rows[1].tab_idx, 1);
+        assert_eq!(tab_rows[0].rect.y, cards[0].rect.y + cards[0].rect.height);
+        assert_eq!(tab_rows[1].rect.y, tab_rows[0].rect.y + 1);
+    }
+
+    #[test]
+    fn workspace_tab_rows_scroll_independently_of_parent_card() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("repo");
+        workspace.test_add_tab(Some("two"));
+        workspace.test_add_tab(Some("three"));
+        app.workspaces = vec![workspace];
+        app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        app.sidebar_spaces.show_tabs = true;
+        let area = Rect::new(0, 0, 30, 10);
+
+        let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+        let metrics = workspace_list_scroll_metrics(&app, ws_area);
+        assert!(metrics.max_offset_from_bottom > 0);
+        app.workspace_scroll = normalized_workspace_scroll(&app, area, usize::MAX);
+        let (cards, tab_rows) = compute_workspace_list_areas(&app, area);
+
+        assert!(cards.is_empty());
+        assert_eq!(tab_rows.last().map(|row| row.tab_idx), Some(2));
+    }
+
+    #[test]
+    fn workspace_tab_row_renders_focused_pane_terminal_title() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("repo");
+        workspace.tabs[0].set_custom_name("review".into());
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        app.sidebar_spaces.show_tabs = true;
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_terminal_title(Some("⠋ session title".into()));
+        let area = Rect::new(0, 0, 30, 20);
+        let (cards, tab_rows) = compute_workspace_list_areas(&app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.workspace_tab_row_areas = tab_rows;
+        let tab_row = app.view.workspace_tab_row_areas[0];
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    workspace_list_rect(area, app.sidebar_section_split),
+                    false,
+                )
+            })
+            .unwrap();
+
+        let rendered = row_text(
+            terminal.backend().buffer(),
+            tab_row.rect.y,
+            tab_row.rect.width,
+        );
+        assert!(rendered.contains("review"));
+        assert!(rendered.contains("session title"));
+        assert!(!rendered.contains('⠋'));
+    }
+
+    #[test]
     fn space_row_gap_preserves_compact_worktree_children() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
@@ -2770,6 +3065,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let indicator_row = workspace_drop_indicator_row(
             &app,
             &app.view.workspace_card_areas,
+            &app.view.workspace_tab_row_areas,
             list_area,
             crate::app::state::WorkspaceDropTarget::Before(2),
         )

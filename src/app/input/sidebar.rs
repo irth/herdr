@@ -316,6 +316,34 @@ impl AppState {
         })
     }
 
+    pub(super) fn workspace_tab_target_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<(usize, crate::layout::PaneId)> {
+        let computed;
+        let tab_rows = if self.view.workspace_tab_row_areas.is_empty() {
+            computed = crate::ui::compute_workspace_list_areas(self, self.view.sidebar_rect).1;
+            &computed
+        } else {
+            &self.view.workspace_tab_row_areas
+        };
+        let target = tab_rows.iter().find(|target| {
+            col >= target.rect.x
+                && col < target.rect.x + target.rect.width
+                && row >= target.rect.y
+                && row < target.rect.y + target.rect.height
+        })?;
+        let pane_id = self
+            .workspaces
+            .get(target.ws_idx)?
+            .tabs
+            .get(target.tab_idx)?
+            .layout
+            .focused();
+        Some((target.ws_idx, pane_id))
+    }
+
     pub(super) fn collapsed_workspace_at_row(&self, row: u16) -> Option<usize> {
         if !self.sidebar_collapsed {
             return None;
@@ -373,7 +401,12 @@ impl AppState {
         } else {
             self.view.workspace_card_areas.clone()
         };
-        crate::ui::workspace_drop_slots(self, &cards, area)
+        let tab_rows = if self.view.workspace_tab_row_areas.is_empty() {
+            crate::ui::compute_workspace_list_areas(self, self.view.sidebar_rect).1
+        } else {
+            self.view.workspace_tab_row_areas.clone()
+        };
+        crate::ui::workspace_drop_slots(self, &cards, &tab_rows, area)
             .into_iter()
             .enumerate()
             .min_by_key(|(slot_idx, (_, slot_row))| (row.abs_diff(*slot_row), *slot_idx))
@@ -1212,6 +1245,81 @@ mod tests {
     }
 
     #[test]
+    fn clicking_workspace_tab_child_focuses_it_without_arming_drag() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("first");
+        let mut second = Workspace::test_new("second");
+        second.test_add_tab(Some("review"));
+        app.state.workspaces = vec![first, second];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.sidebar_spaces.show_tabs = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+        let target = app
+            .state
+            .view
+            .workspace_tab_row_areas
+            .iter()
+            .find(|target| target.ws_idx == 1 && target.tab_idx == 1)
+            .copied()
+            .unwrap();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.rect.x + 2,
+            target.rect.y,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.workspaces[1].active_tab_index(), 1);
+        assert!(app.state.workspace_presses.is_empty());
+        assert!(app.state.tab_presses.is_empty());
+        assert!(app.state.drag.is_none());
+    }
+
+    #[test]
+    fn workspace_parent_remains_drag_source_when_tab_children_are_visible() {
+        let mut app = app_for_mouse_test();
+        let mut first = Workspace::test_new("first");
+        first.test_add_tab(Some("review"));
+        app.state.workspaces = vec![first, Workspace::test_new("second")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.sidebar_spaces.show_tabs = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+        let source = app.state.view.workspace_card_areas[0].rect;
+        let target_row = crate::ui::workspace_drop_indicator_row(
+            &app.state,
+            &app.state.view.workspace_card_areas,
+            &app.state.view.workspace_tab_row_areas,
+            app.state.workspace_list_rect(),
+            crate::app::state::WorkspaceDropTarget::End,
+        )
+        .unwrap();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            source.x + 1,
+            source.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            source.x + 1,
+            target_row,
+        ));
+
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::WorkspaceReorder {
+                source_ws_idx: 0,
+                drop_target: Some(crate::app::state::WorkspaceDropTarget::End),
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn clicking_worktree_parent_row_focuses_workspace_without_toggling() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("issue")];
@@ -1341,6 +1449,7 @@ mod tests {
         let target_row = crate::ui::workspace_drop_indicator_row(
             &app.state,
             &app.state.view.workspace_card_areas,
+            &app.state.view.workspace_tab_row_areas,
             app.state.workspace_list_rect(),
             crate::app::state::WorkspaceDropTarget::Before(0),
         )
@@ -1617,6 +1726,7 @@ mod tests {
         let bottom_slot = crate::ui::workspace_drop_indicator_row(
             &app.state,
             cards,
+            &app.state.view.workspace_tab_row_areas,
             app.state.workspace_list_rect(),
             crate::app::state::WorkspaceDropTarget::End,
         )
@@ -1653,6 +1763,7 @@ mod tests {
             crate::ui::workspace_drop_indicator_row(
                 &app.state,
                 cards,
+                &app.state.view.workspace_tab_row_areas,
                 app.state.workspace_list_rect(),
                 crate::app::state::WorkspaceDropTarget::End,
             ),
@@ -1705,6 +1816,7 @@ mod tests {
         let target_row = crate::ui::workspace_drop_indicator_row(
             &app.state,
             &app.state.view.workspace_card_areas,
+            &app.state.view.workspace_tab_row_areas,
             app.state.workspace_list_rect(),
             crate::app::state::WorkspaceDropTarget::End,
         )
@@ -1764,6 +1876,7 @@ mod tests {
         let target_row = crate::ui::workspace_drop_indicator_row(
             &app.state,
             &app.state.view.workspace_card_areas,
+            &app.state.view.workspace_tab_row_areas,
             app.state.workspace_list_rect(),
             crate::app::state::WorkspaceDropTarget::End,
         )
@@ -1814,6 +1927,7 @@ mod tests {
         let target_row = crate::ui::workspace_drop_indicator_row(
             &app.state,
             &app.state.view.workspace_card_areas,
+            &app.state.view.workspace_tab_row_areas,
             app.state.workspace_list_rect(),
             crate::app::state::WorkspaceDropTarget::Before(0),
         )
