@@ -179,6 +179,8 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_snapshot: Option<crate::protocol::ClientShellSnapshot>,
     /// View policy paired with the last coherent shell replacement.
     pub(crate) shell_agent_view: Option<crate::api::schema::AgentViewSetParams>,
+    /// Fork-owned tab titles paired with the last shell replacement, shared across clients.
+    pub(crate) shell_tab_titles: std::sync::Arc<std::collections::BTreeMap<String, String>>,
     /// Monotonic shell replacement revision for this connection.
     pub(crate) shell_projection_revision: u64,
     /// Whether this shell is waiting for one ordered endpoint command response.
@@ -247,6 +249,7 @@ impl ClientConnection {
             shell_location: None,
             shell_snapshot: None,
             shell_agent_view: None,
+            shell_tab_titles: Default::default(),
             shell_projection_revision: 0,
             shell_endpoint_command_in_flight: false,
             shell_endpoint_command_surface_revision: None,

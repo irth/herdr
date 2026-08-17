@@ -1890,6 +1890,12 @@ async fn run_client_loop(
                                 }
                                 continue;
                             }
+                            Ok(endpoint::EndpointControlMessage::TabTitles(titles)) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.set_endpoint_tab_titles(&endpoint_id, generation, titles);
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::Ignored) => {
                                 debug!(%kind, "ignoring unknown endpoint control message");
                                 continue;

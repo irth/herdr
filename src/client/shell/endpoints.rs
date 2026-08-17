@@ -21,6 +21,7 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pub(crate) agent_view_projection_supported: bool,
+    pub(super) tab_titles: super::tab_titles::TabTitles,
     pub(crate) methods: Option<HashSet<String>>,
 }
 
@@ -81,6 +82,9 @@ impl ClientShellState {
                     .and_then(|endpoint| endpoint.pending_agent_view_projection.clone()),
                 agent_view_projection_supported: previous
                     .is_some_and(|endpoint| endpoint.agent_view_projection_supported),
+                tab_titles: previous
+                    .map(|endpoint| endpoint.tab_titles.clone())
+                    .unwrap_or_default(),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
             });
         }
@@ -123,6 +127,7 @@ impl ClientShellState {
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
+            endpoint.tab_titles = Default::default();
         }
     }
 
@@ -579,6 +584,9 @@ impl ClientShellState {
         endpoint.agent_recency = recency;
         endpoint.snapshot_generation = generation;
         endpoint.snapshot = Some(snapshot);
+        endpoint
+            .tab_titles
+            .reconcile(endpoint.snapshot_generation, endpoint.snapshot.as_deref());
         let pending_matches =
             endpoint
                 .pending_agent_view_projection
@@ -698,6 +706,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         agent_view_projection: None,
         pending_agent_view_projection: None,
         agent_view_projection_supported: false,
+        tab_titles: Default::default(),
         methods: None,
     }
 }

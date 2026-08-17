@@ -515,6 +515,9 @@ impl ClientShellState {
             || self.hits.workspaces.iter().any(|hit| {
                 hit.endpoint_id != self.active_endpoint_id && super::contains(hit.rect, point)
             })
+            || self.hits.workspace_tabs.iter().any(|hit| {
+                hit.endpoint_id != self.active_endpoint_id && super::contains(hit.rect, point)
+            })
         {
             return None;
         }
@@ -544,14 +547,23 @@ impl ClientShellState {
                 .is_some_and(|workspace| workspace.workspace_id == last_hit.workspace_id)
         })?;
         let next = entries.get(last_position + 1);
-        if !next.is_some_and(|entry| entry.indented) {
+        let last_tab = self.hits.workspace_tabs.iter().rev().find(|hit| {
+            hit.endpoint_id == self.active_endpoint_id && hit.workspace_id == last_hit.workspace_id
+        });
+        let tabs_complete = !self.config.spaces.show_tabs
+            || last_tab.is_some_and(|hit| hit.last)
+            || !snapshot
+                .tabs
+                .iter()
+                .any(|tab| tab.workspace_id == last_hit.workspace_id);
+        if tabs_complete && !next.is_some_and(|entry| entry.indented) {
             let before = next.and_then(|entry| {
                 snapshot
                     .workspaces
                     .get(entry.index)
                     .map(|workspace| workspace.workspace_id.clone())
             });
-            let row = last_hit.rect.bottom();
+            let row = last_tab.map_or(last_hit.rect.bottom(), |hit| hit.rect.bottom());
             if row < self.hits.new_workspace.y {
                 slots.push((before, row));
             }
@@ -2047,6 +2059,21 @@ impl ClientShellState {
                     self.toggle_collapsed_group(&endpoint_id, key);
                     outcome.repaint = true;
                     self.persist_chrome_preferences(outcome);
+                    return;
+                }
+                let workspace_tab = self
+                    .hits
+                    .workspace_tabs
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .map(|hit| (hit.endpoint_id.clone(), hit.tab_id.clone()));
+                if let Some((endpoint_id, tab_id)) = workspace_tab {
+                    self.mode = ClientShellMode::Terminal;
+                    self.focus_or_activate(
+                        endpoint_id,
+                        ClientEndpointFocusTarget::Tab(tab_id),
+                        outcome,
+                    );
                     return;
                 }
                 let workspace_press = self

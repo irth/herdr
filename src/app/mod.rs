@@ -154,6 +154,8 @@ pub struct App {
     pub render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<crate::render_signal::RenderSignal>,
     pub(crate) full_redraw_pending: bool,
+    /// Stripped titles changed since the server last checked metadata delivery.
+    pub(crate) terminal_titles_dirty: bool,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
     pub(crate) config_reloaded_from_disk: bool,
     client_shell_keybindings_profile: Option<String>,
@@ -616,6 +618,7 @@ impl App {
             render_notify,
             render_dirty,
             full_redraw_pending: false,
+            terminal_titles_dirty: false,
             overlay_panes: HashMap::new(),
             config_reloaded_from_disk: false,
             client_shell_keybindings_profile,

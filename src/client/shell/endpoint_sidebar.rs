@@ -1,4 +1,5 @@
 use super::render::{display_width, put_right_text, put_text, ShellRenderState};
+use super::sidebar::WorkspaceListItem;
 use super::*;
 
 fn collapsed_groups_for_endpoint<'a>(
@@ -250,7 +251,7 @@ pub(super) fn render_expanded(
         Endpoint(usize),
         Workspace {
             endpoint: usize,
-            entry: WorkspaceEntry,
+            item: WorkspaceListItem,
         },
     }
     let mut rows = Vec::new();
@@ -263,12 +264,16 @@ pub(super) fn render_expanded(
             let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                 .unwrap_or(&empty_collapsed_groups);
             rows.extend(
-                super::sidebar::workspace_entries(snapshot, collapsed_groups)
-                    .into_iter()
-                    .map(|entry| Row::Workspace {
-                        endpoint: endpoint_index,
-                        entry,
-                    }),
+                super::sidebar::workspace_list_items(
+                    snapshot,
+                    collapsed_groups,
+                    config.spaces.show_tabs,
+                )
+                .into_iter()
+                .map(|item| Row::Workspace {
+                    endpoint: endpoint_index,
+                    item,
+                }),
             );
         }
     }
@@ -285,7 +290,10 @@ pub(super) fn render_expanded(
         .iter()
         .map(|row| match row {
             Row::Endpoint(_) => 1,
-            Row::Workspace { endpoint, entry } => {
+            Row::Workspace { endpoint, item } => {
+                let WorkspaceListItem::Workspace(entry) = item else {
+                    return 1;
+                };
                 let endpoint = &state.endpoints[*endpoint];
                 let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                     .unwrap_or(&empty_collapsed_groups);
@@ -322,15 +330,20 @@ pub(super) fn render_expanded(
                 Row::Workspace { endpoint, .. },
                 Some(Row::Workspace {
                     endpoint: next_endpoint,
-                    entry,
+                    item,
                 }),
-            ) if endpoint == next_endpoint => u16::from(!entry.indented) * config.spaces.row_gap,
+            ) if endpoint == next_endpoint => {
+                super::sidebar::workspace_item_gap(*item, config.spaces.row_gap)
+            }
             _ => 0,
         })
         .collect::<Vec<_>>();
     if std::mem::take(state.reveal_navigation_workspace) {
         let selected_row = rows.iter().position(|row| match row {
-            Row::Workspace { endpoint, entry } => {
+            Row::Workspace {
+                endpoint,
+                item: WorkspaceListItem::Workspace(entry),
+            } => {
                 let endpoint = &state.endpoints[*endpoint];
                 endpoint
                     .snapshot
@@ -342,7 +355,7 @@ pub(super) fn render_expanded(
                         })
                     })
             }
-            Row::Endpoint(_) => false,
+            _ => false,
         });
         if let Some(selected_row) = selected_row {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
@@ -400,7 +413,8 @@ pub(super) fn render_expanded(
                     .saturating_add(1)
                     .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
             }
-            Row::Workspace { endpoint, entry } => {
+            Row::Workspace { endpoint, item } => {
+                let entry = item.entry();
                 let endpoint = &state.endpoints[*endpoint];
                 let Some(snapshot) = endpoint.snapshot.as_deref() else {
                     continue;
@@ -408,6 +422,41 @@ pub(super) fn render_expanded(
                 let Some(workspace) = snapshot.workspaces.get(entry.index) else {
                     continue;
                 };
+                if let WorkspaceListItem::Tab { index, last, .. } = item {
+                    if y >= body.bottom() {
+                        break;
+                    }
+                    let rect = Rect::new(body.x, y, content_width, 1);
+                    let nested =
+                        Rect::new(rect.x.saturating_add(2), y, rect.width.saturating_sub(2), 1);
+                    super::sidebar::render_workspace_tab(
+                        buffer,
+                        nested,
+                        &snapshot.tabs[*index],
+                        endpoint.tab_title(&snapshot.tabs[*index].tab_id),
+                        entry,
+                        *last,
+                        &endpoint.endpoint_id == state.active_endpoint_id,
+                        palette,
+                    );
+                    if endpoint.status != ClientEndpointStatus::Online {
+                        buffer.set_style(
+                            rect,
+                            Style::default()
+                                .fg(palette.overlay0)
+                                .add_modifier(Modifier::DIM),
+                        );
+                    }
+                    hits.workspace_tabs.push(WorkspaceTabHit {
+                        rect,
+                        endpoint_id: endpoint.endpoint_id.clone(),
+                        workspace_id: workspace.workspace_id.clone(),
+                        tab_id: snapshot.tabs[*index].tab_id.clone(),
+                        last: *last,
+                    });
+                    y = y.saturating_add(1).saturating_add(gaps[row_index]);
+                    continue;
+                }
                 let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                     .unwrap_or(&empty_collapsed_groups);
                 let status = super::sidebar::displayed_workspace_status(
@@ -442,7 +491,7 @@ pub(super) fn render_expanded(
                     workspace,
                     status,
                     config.status_indicators,
-                    entry,
+                    &entry,
                     tokens,
                     endpoint_active,
                     selected,

@@ -4,6 +4,24 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
+#[derive(Clone, Copy)]
+pub(in crate::client::shell) enum WorkspaceListItem {
+    Workspace(WorkspaceEntry),
+    Tab {
+        entry: WorkspaceEntry,
+        index: usize,
+        last: bool,
+    },
+}
+
+impl WorkspaceListItem {
+    pub(in crate::client::shell) fn entry(self) -> WorkspaceEntry {
+        match self {
+            Self::Workspace(entry) | Self::Tab { entry, .. } => entry,
+        }
+    }
+}
+
 pub(in crate::client::shell) fn collapsed_sidebar_sections(
     area: Rect,
 ) -> (Rect, Option<u16>, Rect) {
@@ -210,7 +228,7 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let entries = workspace_list_items(snapshot, state.collapsed_groups, config.spaces.show_tabs);
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -222,7 +240,10 @@ pub(crate) fn render_sidebar(
     hits.workspace_body = body;
     let row_heights = entries
         .iter()
-        .map(|entry| {
+        .map(|item| {
+            let WorkspaceListItem::Workspace(entry) = item else {
+                return 1;
+            };
             snapshot
                 .workspaces
                 .get(entry.index)
@@ -246,7 +267,7 @@ pub(crate) fn render_sidebar(
         .map(|(index, _)| {
             entries
                 .get(index + 1)
-                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
+                .map_or(0, |next| workspace_item_gap(*next, config.spaces.row_gap))
         })
         .collect::<Vec<_>>();
     let mut metrics = super::scroll::list_scroll_metrics(
@@ -258,7 +279,7 @@ pub(crate) fn render_sidebar(
     if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
         if let Some(target) = entries
             .iter()
-            .position(|entry| snapshot.workspaces[entry.index].focused)
+            .position(|item| matches!(item, WorkspaceListItem::Workspace(entry) if snapshot.workspaces[entry.index].focused))
         {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
                 &row_heights,
@@ -282,11 +303,42 @@ pub(crate) fn render_sidebar(
         .saturating_sub(metrics.offset_from_bottom);
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
+    let endpoint = state
+        .endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id);
     let mut y = body.y;
-    for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
+    for (entry_position, item) in entries.iter().enumerate().skip(*state.workspace_scroll) {
+        let entry = item.entry();
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
         };
+        let gap = gaps[entry_position];
+        if let WorkspaceListItem::Tab { index, last, .. } = item {
+            if y >= body.bottom() {
+                break;
+            }
+            let rect = Rect::new(body.x, y, content_width, 1);
+            render_workspace_tab(
+                buffer,
+                rect,
+                &snapshot.tabs[*index],
+                endpoint.and_then(|endpoint| endpoint.tab_title(&snapshot.tabs[*index].tab_id)),
+                entry,
+                *last,
+                true,
+                palette,
+            );
+            hits.workspace_tabs.push(WorkspaceTabHit {
+                rect,
+                endpoint_id: state.active_endpoint_id.clone(),
+                workspace_id: workspace.workspace_id.clone(),
+                tab_id: snapshot.tabs[*index].tab_id.clone(),
+                last: *last,
+            });
+            y = y.saturating_add(1).saturating_add(gap);
+            continue;
+        }
         let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
         let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
         let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
@@ -311,7 +363,7 @@ pub(crate) fn render_sidebar(
             workspace,
             status,
             config.status_indicators,
-            entry,
+            &entry,
             rows,
             true,
             selected,
@@ -333,9 +385,6 @@ pub(crate) fn render_sidebar(
             indented: entry.indented,
             group_toggle,
         });
-        let gap = entries
-            .get(entry_position + 1)
-            .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
         y = y.saturating_add(row_height + gap);
     }
 
@@ -436,6 +485,116 @@ pub(crate) fn render_sidebar(
         hits.sidebar_toggle.width,
         "«",
         Style::default().fg(palette.overlay0),
+    );
+}
+
+// Build tab children in one pass over tabs, rather than scanning every tab per workspace.
+pub(in crate::client::shell) fn workspace_list_items(
+    snapshot: &ClientShellSnapshot,
+    collapsed_groups: &HashSet<String>,
+    show_tabs: bool,
+) -> Vec<WorkspaceListItem> {
+    let entries = workspace_entries(snapshot, collapsed_groups);
+    if !show_tabs {
+        return entries
+            .into_iter()
+            .map(WorkspaceListItem::Workspace)
+            .collect();
+    }
+    let mut tabs = HashMap::<&str, Vec<usize>>::new();
+    for (index, tab) in snapshot.tabs.iter().enumerate() {
+        tabs.entry(&tab.workspace_id).or_default().push(index);
+    }
+    let mut items = Vec::with_capacity(entries.len() + snapshot.tabs.len());
+    for entry in entries {
+        items.push(WorkspaceListItem::Workspace(entry));
+        if let Some(indices) = tabs.get(snapshot.workspaces[entry.index].workspace_id.as_str()) {
+            for (position, index) in indices.iter().enumerate() {
+                items.push(WorkspaceListItem::Tab {
+                    entry,
+                    index: *index,
+                    last: position + 1 == indices.len(),
+                });
+            }
+        }
+    }
+    items
+}
+
+pub(in crate::client::shell) fn workspace_item_gap(next: WorkspaceListItem, row_gap: u16) -> u16 {
+    match next {
+        WorkspaceListItem::Workspace(entry) if !entry.indented => row_gap,
+        _ => 0,
+    }
+}
+
+pub(in crate::client::shell) fn render_workspace_tab(
+    buffer: &mut Buffer,
+    rect: Rect,
+    tab: &crate::protocol::ClientShellTab,
+    title: Option<&str>,
+    entry: WorkspaceEntry,
+    last: bool,
+    endpoint_active: bool,
+    palette: &Palette,
+) {
+    let active = endpoint_active && tab.focused;
+    if active {
+        buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+    }
+    let mut x = rect.x.saturating_add(if entry.indented { 6 } else { 3 });
+    x = put_segment(
+        buffer,
+        x,
+        rect.y,
+        rect.right(),
+        if last { "└─ " } else { "├─ " },
+        Style::default().fg(palette.overlay0),
+    );
+    let style = if active {
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.subtext0)
+    };
+    let available = rect.right().saturating_sub(x);
+    if let Some(title) = title.filter(|title| !title.is_empty() && available > 4) {
+        let flexible = available - 3;
+        let tab_budget = display_width(&tab.label).min(flexible.div_ceil(2));
+        x = put_segment(
+            buffer,
+            x,
+            rect.y,
+            rect.right(),
+            &crate::ui::truncate_end(&tab.label, usize::from(tab_budget)),
+            style,
+        );
+        x = put_segment(
+            buffer,
+            x,
+            rect.y,
+            rect.right(),
+            " · ",
+            Style::default().fg(palette.overlay0),
+        );
+        put_text(
+            buffer,
+            x,
+            rect.y,
+            rect.right().saturating_sub(x),
+            &crate::ui::truncate_end(title, usize::from(flexible - tab_budget)),
+            Style::default().fg(palette.overlay0),
+        );
+        return;
+    }
+    put_text(
+        buffer,
+        x,
+        rect.y,
+        rect.right().saturating_sub(x),
+        &crate::ui::truncate_end(&tab.label, usize::from(available)),
+        style,
     );
 }
 

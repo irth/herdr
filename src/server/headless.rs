@@ -1476,8 +1476,8 @@ impl HeadlessServer {
     }
 
     /// Pulls only titles reported dirty by the PTY parser. A focused pane title
-    /// is forwarded as an independent client side effect; only sidebar title
-    /// tokens require a UI render.
+    /// is forwarded as an independent client side effect. Stripped title changes
+    /// also refresh the optional tab-title projection; spinner-only changes do not.
     fn sync_terminal_title_sources(
         &mut self,
         sources: &HashSet<crate::layout::PaneId>,
@@ -1496,12 +1496,31 @@ impl HeadlessServer {
             .map(|tab| tab.layout.focused())
             .is_some_and(|pane_id| sources.contains(&pane_id));
         let changes = self.app.sync_terminal_titles(sources);
+        // API reads may have synced the cache before this render request is handled.
+        // Keep that dirty fact until delivery is considered, and ignore changes to titles
+        // that no tab projects (for example, an unfocused split pane).
+        let titles_changed = std::mem::take(&mut self.app.terminal_titles_dirty);
+        let tab_titles_changed = if titles_changed
+            && self
+                .clients
+                .values()
+                .any(|client| client.is_shell_client() && client.writer.is_some())
+        {
+            let titles = crate::server::client_shell::tab_titles(&self.app);
+            self.clients.values().any(|client| {
+                client.is_shell_client()
+                    && client.writer.is_some()
+                    && *client.shell_tab_titles != titles
+            })
+        } else {
+            false
+        };
         let outer_title_synced = focused_source && self.app.window_title_uses_terminal_title();
         if outer_title_synced {
             self.sync_window_title();
         }
         (
-            self.app.terminal_title_sidebar_changed(&changes),
+            tab_titles_changed || self.app.terminal_title_sidebar_changed(&changes),
             outer_title_synced,
         )
     }
@@ -2031,6 +2050,22 @@ impl HeadlessServer {
                 let location =
                     crate::server::clients::ClientShellLocation::from_snapshot(&seed_snapshot);
                 let agent_view = self.app.state.agent_view_override.clone();
+                let tab_titles = crate::server::client_shell::tab_titles(&self.app);
+                let title_message = if tab_titles.is_empty() {
+                    None
+                } else {
+                    match crate::protocol::endpoint::tab_titles_message(
+                        &seed_snapshot.boot_id,
+                        seed_snapshot.revision,
+                        &tab_titles,
+                    ) {
+                        Ok(message) => Some(message),
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to encode tab titles");
+                            return false;
+                        }
+                    }
+                };
                 let projection_message = match agent_view.as_ref() {
                     Some(view) => match crate::protocol::endpoint::agent_view_projection_message(
                         &seed_snapshot.boot_id,
@@ -2056,11 +2091,15 @@ impl HeadlessServer {
                 connection.shell_location = Some(location);
                 connection.shell_snapshot = Some(seed_snapshot);
                 connection.shell_agent_view = agent_view;
+                connection.shell_tab_titles = std::sync::Arc::new(tab_titles);
                 self.clients.insert(client_id, connection);
                 if self.app.state.popup_pane.is_some() && self.popup_owner_tab_id.is_none() {
                     self.popup_owner_tab_id = self.shell_tab_id_for_client(client_id);
                 }
                 if let Some(message) = projection_message {
+                    self.send_to_client(client_id, message);
+                }
+                if let Some(message) = title_message {
                     self.send_to_client(client_id, message);
                 }
                 self.send_to_client(client_id, snapshot_message);

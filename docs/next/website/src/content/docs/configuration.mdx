@@ -361,12 +361,17 @@ rows = [
 ]
 
 [ui.sidebar.spaces]
+show_tabs = false
 row_gap = 0
 rows = [
   ["state_icon", "workspace"],
   ["branch", "git_status"],
 ]
 ```
+
+Set `show_tabs = true` to render every visible workspace's tabs as always-expanded child rows. A child row shows the tab name and, when available, the focused pane's stripped terminal title. Clicking a child focuses that tab. Workspace rows remain the only drag targets; reorder tabs from the tab bar.
+
+Terminal titles use this fork's optional `io.kwolek.herdr.tab-titles` capability and `io.kwolek.herdr.tab-titles.v1` JSON control message. The message contains `boot_id`, `revision`, and a `titles` map keyed by tab ID; the map replaces the titles for the matching snapshot. Clients connected to servers without this extension show tab names only. Upstream clients ignore the optional message.
 
 Agent rows accept these built-in tokens:
 

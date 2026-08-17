@@ -406,4 +406,81 @@ async fn render_scale_profile() {
     print_snapshot_encoding_profiles("active panes", active_panes);
     print_token_rule_profiles();
     print_surface_reuse_profiles();
+    print_tab_title_profiles();
+}
+
+fn print_tab_title_profiles() {
+    println!("\nsidebar tabs (three populated tabs/workspace, fixed {COLS}x{ROWS})");
+    println!("  spaces  show_tabs  client median us  titles+encode median us");
+    for count in [1, 15] {
+        for show_tabs in [false, true] {
+            let mut spaces = workspaces(count);
+            let history = history();
+            for workspace in &mut spaces {
+                for name in ["review", "build"] {
+                    let index = workspace.test_add_tab(Some(name));
+                    workspace
+                        .insert_test_runtime(workspace.tabs[index].root_pane, runtime(&history));
+                }
+            }
+            let mut config = Config::default();
+            config.ui.sidebar.spaces.show_tabs = show_tabs;
+            let mut pipeline = RenderPipeline::with_config(spaces, &config);
+            pipeline.app.state.ensure_test_terminals();
+            for workspace in &pipeline.app.state.workspaces {
+                for tab in &workspace.tabs {
+                    let id = tab.terminal_id(tab.layout.focused()).unwrap();
+                    pipeline
+                        .app
+                        .state
+                        .terminals
+                        .get_mut(id)
+                        .unwrap()
+                        .set_terminal_title(Some("session title".into()));
+                }
+            }
+            let endpoint = crate::client::endpoint::ClientEndpointId::Local;
+            pipeline.client.set_endpoint_snapshot_for_generation(
+                &endpoint,
+                1,
+                Box::new(super::client_shell::snapshot(
+                    &pipeline.app,
+                    "bench-boot",
+                    1,
+                    None,
+                    None,
+                )),
+            );
+            pipeline.client.set_endpoint_tab_titles(
+                &endpoint,
+                1,
+                crate::protocol::endpoint::EndpointTabTitles {
+                    boot_id: "bench-boot".into(),
+                    revision: 1,
+                    titles: super::client_shell::tab_titles(&pipeline.app),
+                },
+            );
+            let mut client_samples = Vec::new();
+            let mut title_samples = Vec::new();
+            for index in 0..WARMUP_COUNT + SAMPLE_COUNT {
+                let started = Instant::now();
+                let titles = super::client_shell::tab_titles(&pipeline.app);
+                black_box(
+                    crate::protocol::endpoint::tab_titles_message("bench-boot", 1, &titles)
+                        .unwrap(),
+                );
+                let elapsed = started.elapsed();
+                let (_, client) = pipeline.render_once();
+                if index >= WARMUP_COUNT {
+                    title_samples.push(elapsed);
+                    client_samples.push(client);
+                }
+            }
+            println!(
+                "  {count:>6}  {show_tabs:>9}  {:>16}  {:>23}",
+                summarize(client_samples).median_us,
+                summarize(title_samples).median_us
+            );
+        }
+    }
 }

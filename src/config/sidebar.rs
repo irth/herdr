@@ -461,6 +461,7 @@ pub struct SpacesSidebarConfig {
     #[serde(deserialize_with = "deserialize_sidebar_rows")]
     pub rows: SpaceSidebarRows,
     pub row_gap: u16,
+    pub show_tabs: bool,
 }
 
 impl Default for SpacesSidebarConfig {
@@ -471,6 +472,7 @@ impl Default for SpacesSidebarConfig {
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ],
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            show_tabs: false,
         }
     }
 }
@@ -511,6 +513,7 @@ mod tests {
             ]
         );
         assert_eq!(config.spaces.row_gap, 0);
+        assert!(!config.spaces.show_tabs);
     }
 
     #[test]
@@ -527,6 +530,7 @@ claude = [["terminal_title_stripped"], ["agent", "$model"]]
 [ui.sidebar.spaces]
 rows = [["workspace"], ["$jj_status"]]
 row_gap = 3
+show_tabs = true
 "#,
         )
         .expect("sidebar token config");
@@ -563,6 +567,7 @@ row_gap = 3
             vec![SpaceSidebarToken::Custom("jj_status".into())]
         );
         assert_eq!(config.ui.sidebar.spaces.row_gap, 3);
+        assert!(config.ui.sidebar.spaces.show_tabs);
     }
 
     #[test]

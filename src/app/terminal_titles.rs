@@ -73,6 +73,7 @@ impl App {
             self.emit_pane_updated(ws_idx, pane_id);
         }
 
+        self.terminal_titles_dirty |= changes.stripped_changed;
         changes
     }
 }

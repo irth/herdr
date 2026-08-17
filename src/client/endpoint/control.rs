@@ -9,6 +9,7 @@ pub(crate) struct DecodedAgentViewProjection {
 pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
+    TabTitles(crate::protocol::endpoint::EndpointTabTitles),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     Ignored,
 }
@@ -51,6 +52,11 @@ pub(crate) fn decode_endpoint_control(
         let snapshot = serde_json::from_str(data)
             .map_err(|error| format!("invalid endpoint snapshot: {error}"))?;
         return Ok(EndpointControlMessage::Snapshot(Box::new(snapshot)));
+    }
+    if kind == crate::protocol::endpoint::TAB_TITLES_KIND {
+        return Ok(serde_json::from_str(data)
+            .map(EndpointControlMessage::TabTitles)
+            .unwrap_or(EndpointControlMessage::Ignored));
     }
     if kind.starts_with("shell.snapshot.") {
         return Err(format!(
@@ -132,6 +138,38 @@ mod tests {
             .unwrap(),
             EndpointControlMessage::Ignored
         ));
+    }
+
+    #[test]
+    fn tab_titles_extension_decodes_and_ignores_unsupported_payloads() {
+        let titles = std::collections::BTreeMap::from([("w1:t2".into(), "review".into())]);
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+            crate::protocol::endpoint::tab_titles_message("boot", 9, &titles).unwrap()
+        else {
+            panic!("control envelope")
+        };
+        assert_eq!(kind, "io.kwolek.herdr.tab-titles.v1");
+        let EndpointControlMessage::TabTitles(decoded) =
+            decode_endpoint_control(&kind, &data).unwrap()
+        else {
+            panic!("tab titles")
+        };
+        assert_eq!(decoded.boot_id, "boot");
+        assert_eq!(decoded.revision, 9);
+        assert_eq!(decoded.titles, titles);
+        for (kind, data) in [
+            (kind.as_str(), "not json"),
+            (
+                kind.as_str(),
+                r#"{"boot_id":"boot","revision":9,"titles":[]}"#,
+            ),
+            ("io.kwolek.herdr.tab-titles.v2", "{}"),
+        ] {
+            assert!(matches!(
+                decode_endpoint_control(kind, data).unwrap(),
+                EndpointControlMessage::Ignored
+            ));
+        }
     }
 
     #[test]

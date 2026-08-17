@@ -434,7 +434,7 @@ fn configured_window_title_reaches_the_foreground_client_once_per_change() {
 }
 
 #[tokio::test]
-async fn focused_terminal_title_syncs_without_requesting_a_sidebar_render() {
+async fn focused_terminal_title_refreshes_tab_titles_but_spinner_only_changes_do_not() {
     let (mut server, control_rx) = window_title_test_server();
     server.app.configure_window_title("{terminal_title}");
     server.app.state.ensure_test_terminals();
@@ -452,7 +452,7 @@ async fn focused_terminal_title_syncs_without_requesting_a_sidebar_render() {
 
     assert_eq!(
         server.sync_terminal_title_sources(&HashSet::from([pane_id])),
-        (false, true)
+        (true, true)
     );
     assert_eq!(
         next_window_title(&control_rx),
@@ -498,6 +498,58 @@ fn a_foreground_client_without_a_writer_does_not_cache_the_window_title() {
         Some(Some("herd".to_string()))
     );
 
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn tab_title_refresh_ignores_unprojected_panes_and_preserves_api_synced_changes() {
+    let (mut server, _control_rx) = window_title_test_server();
+    server.app.configure_window_title("{workspace}");
+    let pane = server.app.state.workspaces[0].tabs[0].root_pane;
+    server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+    server.app.state.ensure_test_terminals();
+    let terminal = server.app.state.workspaces[0]
+        .terminal_id(pane)
+        .unwrap()
+        .clone();
+    let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+    runtime.test_process_pty_bytes(b"\x1b]0;hidden split title\x07");
+    server
+        .app
+        .terminal_runtimes
+        .insert(terminal.clone(), runtime);
+    assert_eq!(
+        server.sync_terminal_title_sources(&HashSet::from([pane])),
+        (false, false)
+    );
+
+    server.app.state.workspaces[0].tabs[0]
+        .layout
+        .focus_pane(pane);
+    server
+        .app
+        .terminal_runtimes
+        .get(&terminal)
+        .unwrap()
+        .test_process_pty_bytes(b"\x1b]0;updated by API read\x07");
+    server.app.render_dirty.request_terminal_title(pane);
+    assert!(server.app.sync_pending_terminal_titles().stripped_changed);
+    assert_eq!(
+        server.sync_terminal_title_sources(&HashSet::from([pane])),
+        (true, false)
+    );
+
+    server.clients.clear();
+    server
+        .app
+        .terminal_runtimes
+        .get(&terminal)
+        .unwrap()
+        .test_process_pty_bytes(b"\x1b]0;no viewers\x07");
+    assert_eq!(
+        server.sync_terminal_title_sources(&HashSet::from([pane])),
+        (false, false)
+    );
     shutdown_test_runtimes(&mut server);
 }
 
@@ -912,6 +964,94 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
     assert_eq!(cleared.revision, cleared_snapshot.revision);
     assert!(cleared.view.is_none());
     assert!(cleared_snapshot.agent_view_label.is_none());
+}
+
+#[tokio::test]
+async fn client_shell_pairs_tab_titles_and_clear_with_snapshots() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("repo")];
+    server.app.state.active = Some(0);
+    server.app.state.ensure_test_terminals();
+    let pane = server.app.state.workspaces[0].tabs[0].root_pane;
+    let terminal = server.app.state.workspaces[0]
+        .terminal_id(pane)
+        .unwrap()
+        .clone();
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal)
+        .unwrap()
+        .set_terminal_title(Some("session title".into()));
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            client_id: 77,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: false,
+            writer,
+        })
+    );
+    let read_titles = || {
+        let ServerMessage::EndpointControl { kind, data } =
+            read_server_message(control_rx.recv().unwrap())
+        else {
+            panic!("title companion")
+        };
+        assert_eq!(kind, crate::protocol::endpoint::TAB_TITLES_KIND);
+        serde_json::from_str::<crate::protocol::endpoint::EndpointTabTitles>(&data).unwrap()
+    };
+    let initial = read_titles();
+    let initial_snapshot = client_shell_snapshot(read_server_message(control_rx.recv().unwrap()));
+    assert_eq!(initial.revision, initial_snapshot.revision);
+    assert_eq!(initial.boot_id, initial_snapshot.boot_id);
+    assert_eq!(
+        initial.titles.values().next().map(String::as_str),
+        Some("session title")
+    );
+    // Stabilize unrelated initial state before testing title-only replacements.
+    server.render_and_stream();
+    while control_rx.try_recv().is_ok() {}
+    let revision = server.clients[&77].shell_projection_revision;
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal)
+        .unwrap()
+        .set_terminal_title(Some("new title".into()));
+    server.render_and_stream();
+    let replacement = read_titles();
+    let snapshot = client_shell_snapshot(read_server_message(control_rx.recv().unwrap()));
+    assert!(replacement.revision > revision);
+    assert_eq!(replacement.revision, snapshot.revision);
+    assert_eq!(
+        replacement.titles.values().next().map(String::as_str),
+        Some("new title")
+    );
+
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal)
+        .unwrap()
+        .set_terminal_title(None);
+    server.render_and_stream();
+    let clear = read_titles();
+    let snapshot = client_shell_snapshot(read_server_message(control_rx.recv().unwrap()));
+    assert!(clear.titles.is_empty());
+    assert_eq!(clear.revision, snapshot.revision);
+    assert!(clear.revision > replacement.revision);
 }
 
 #[tokio::test]

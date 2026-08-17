@@ -3,6 +3,29 @@ use ratatui::layout::Rect;
 use crate::app;
 use crate::protocol::{self, FrameData};
 
+/// Read cached terminal metadata once per shell replacement pass, without terminal-core locks.
+pub(super) fn tab_titles(app: &app::App) -> std::collections::BTreeMap<String, String> {
+    app.state
+        .workspaces
+        .iter()
+        .enumerate()
+        .flat_map(|(ws_idx, workspace)| {
+            workspace
+                .tabs
+                .iter()
+                .enumerate()
+                .filter_map(move |(tab_idx, tab)| {
+                    let title = tab
+                        .terminal_id(tab.layout.focused())
+                        .and_then(|id| app.state.terminals.get(id))
+                        .and_then(crate::terminal::TerminalState::terminal_title_stripped)
+                        .filter(|title| !title.is_empty())?;
+                    Some((app.public_tab_id(ws_idx, tab_idx)?, title))
+                })
+        })
+        .collect()
+}
+
 pub(super) fn snapshot(
     app: &app::App,
     boot_id: &str,
@@ -542,6 +565,43 @@ fn split_hit_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_titles_include_background_non_agent_tabs_and_follow_their_focused_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("repo");
+        workspace.test_add_tab(Some("review"));
+        workspace.active_tab = 1;
+        let focused = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.active_tab = 0;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let terminal = app.state.workspaces[0]
+            .terminal_id(focused)
+            .unwrap()
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .set_terminal_title(Some("⠋ session title".into()));
+        let tab_id = app.public_tab_id(0, 1).unwrap();
+        assert_eq!(
+            tab_titles(&app),
+            std::collections::BTreeMap::from([(tab_id, "session title".into())])
+        );
+        let root = app.state.workspaces[0].tabs[1].root_pane;
+        app.state.workspaces[0].tabs[1].layout.focus_pane(root);
+        assert!(tab_titles(&app).is_empty());
+    }
 
     #[test]
     fn snapshot_projects_cached_release_and_update_facts() {

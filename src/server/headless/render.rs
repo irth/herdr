@@ -457,6 +457,17 @@ impl HeadlessServer {
             }
         }
 
+        let tab_titles = std::sync::Arc::new(
+            if render_targets
+                .iter()
+                .any(|(_, _, _, _, mode)| matches!(mode, ClientConnectionMode::ClientShell))
+            {
+                crate::server::client_shell::tab_titles(&self.app)
+            } else {
+                Default::default()
+            },
+        );
+        self.app.terminal_titles_dirty = false;
         let mut broken_clients: Vec<u64> = Vec::new();
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
             #[cfg(unix)]
@@ -498,6 +509,7 @@ impl HeadlessServer {
                 candidate.revision = client.shell_projection_revision;
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_view != agent_view
+                    || client.shell_tab_titles != tab_titles
                 {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
@@ -529,6 +541,27 @@ impl HeadlessServer {
                                 continue;
                             }
                         };
+                    let title_framed =
+                        if !tab_titles.is_empty() || !client.shell_tab_titles.is_empty() {
+                            match crate::protocol::endpoint::tab_titles_message(
+                                &candidate.boot_id,
+                                candidate.revision,
+                                &tab_titles,
+                            )
+                            .map_err(|err| err.to_string())
+                            .and_then(|message| {
+                                Self::frame_server_message(&message).map_err(|err| err.to_string())
+                            }) {
+                                Ok(framed) => Some(framed),
+                                Err(err) => {
+                                    warn!(client_id, %err, "failed to encode tab titles");
+                                    broken_clients.push(client_id);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
                     let projection_framed = match projection_message
                         .as_ref()
                         .map(Self::frame_server_message)
@@ -554,6 +587,7 @@ impl HeadlessServer {
                         continue;
                     };
                     if projection_framed.is_some_and(|framed| writer.control.send(framed).is_err())
+                        || title_framed.is_some_and(|framed| writer.control.send(framed).is_err())
                         || writer.control.send(snapshot_framed).is_err()
                     {
                         broken_clients.push(client_id);
@@ -561,6 +595,7 @@ impl HeadlessServer {
                     }
                     client.shell_snapshot = Some(candidate);
                     client.shell_agent_view = agent_view;
+                    client.shell_tab_titles = tab_titles.clone();
                 }
                 shell_projection_revision = client.shell_projection_revision;
                 if !client.shell_surface_active {

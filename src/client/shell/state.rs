@@ -142,6 +142,7 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
+    pub(super) workspace_tabs: Vec<WorkspaceTabHit>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -281,6 +282,14 @@ pub(super) enum ClientChromeDrag {
         last_sent_offset: Option<usize>,
         last_sent_at: Option<std::time::Instant>,
     },
+}
+
+pub(super) struct WorkspaceTabHit {
+    pub(super) rect: Rect,
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) workspace_id: String,
+    pub(super) tab_id: String,
+    pub(super) last: bool,
 }
 
 pub(super) struct WorkspaceHit {
@@ -1225,6 +1234,13 @@ impl ClientShellState {
             return;
         }
         let target = self.snapshot.as_deref().and_then(|snapshot| {
+            if self.config.spaces.show_tabs && !self.sidebar_collapsed && !self.mobile_layout_active() {
+                let empty = HashSet::new();
+                let groups = self.collapsed_groups_for_endpoint(&self.active_endpoint_id).unwrap_or(&empty);
+                return sidebar::workspace_list_items(snapshot, groups, true).iter().position(|item| {
+                    matches!(item, sidebar::WorkspaceListItem::Workspace(entry) if snapshot.workspaces[entry.index].workspace_id == workspace_id)
+                });
+            }
             self.navigation_workspace_entries(snapshot)
                 .iter()
                 .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)

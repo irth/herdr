@@ -29,6 +29,38 @@ pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
 pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
+pub const TAB_TITLES_CAPABILITY: &str = "io.kwolek.herdr.tab-titles";
+pub const TAB_TITLES_KIND: &str = "io.kwolek.herdr.tab-titles.v1";
+
+/// Fork-owned optional companion to a snapshot. Titles belong to each tab's focused pane.
+/// The map is a full replacement: an omitted tab has no title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointTabTitles {
+    pub boot_id: String,
+    pub revision: u64,
+    pub titles: std::collections::BTreeMap<String, String>,
+}
+
+pub fn tab_titles_message(
+    boot_id: &str,
+    revision: u64,
+    titles: &std::collections::BTreeMap<String, String>,
+) -> serde_json::Result<ServerMessage> {
+    #[derive(Serialize)]
+    struct Payload<'a> {
+        boot_id: &'a str,
+        revision: u64,
+        titles: &'a std::collections::BTreeMap<String, String>,
+    }
+    Ok(ServerMessage::EndpointControl {
+        kind: TAB_TITLES_KIND.into(),
+        data: serde_json::to_string(&Payload {
+            boot_id,
+            revision,
+            titles,
+        })?,
+    })
+}
 
 fn default_true() -> bool {
     true
@@ -147,6 +179,7 @@ impl EndpointServerWelcome {
                 PRESENTATION_EFFECTS_FENCE_CAPABILITY.into(),
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
+                TAB_TITLES_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -349,6 +382,7 @@ mod tests {
                 PRESENTATION_EFFECTS_FENCE_CAPABILITY.to_string(),
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
+                TAB_TITLES_CAPABILITY.to_string(),
             ]
         );
     }
